@@ -2,8 +2,8 @@
 
 import secrets
 
+from pydantic import ConfigDict
 from pydantic_settings import BaseSettings
-from pydantic_settings import ConfigDict
 
 
 class Settings(BaseSettings):

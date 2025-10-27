@@ -22,6 +22,18 @@ class Settings(BaseSettings):
     # Security
     secret_key: str = ""  # Will be generated if empty
     cors_origins: list[str] = []  # Empty by default for security
+    jwt_secret: str = ""  # JWT secret for authentication
+    jwt_algorithm: str = "HS256"
+    access_token_expire_minutes: int = 30
+    
+    # Storage
+    s3_bucket_name: str = ""  # S3 bucket for model storage
+    aws_region: str = "us-east-1"
+    use_local_storage: bool = True  # Use local storage if True, S3 if False
+    
+    # Rate Limiting
+    rate_limit_enabled: bool = True
+    rate_limit_per_minute: int = 60
 
     # Sentry
     sentry_dsn: str | None = None

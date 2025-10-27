@@ -1,0 +1,1160 @@
+ (cd "$(git rev-parse --show-toplevel)" && git apply --3way <<'EOF' 
+diff --git a/.github/workflows/deploy-aws.yml b/.github/workflows/deploy-aws.yml
+new file mode 100644
+index 0000000000000000000000000000000000000000..2215c9659771f9942e56b9eb1882d731f15462da
+--- /dev/null
++++ b/.github/workflows/deploy-aws.yml
+@@ -0,0 +1,96 @@
++name: Deploy to AWS Fargate
++
++on:
++  push:
++    branches: [ main ]
++  workflow_dispatch:
++
++permissions:
++  contents: read
++  id-token: write
++  packages: write
++
++env:
++  IMAGE_NAME: ghcr.io/${{ github.repository }}
++  AWS_REGION: us-east-1
++
++jobs:
++  deploy:
++    runs-on: ubuntu-latest
++
++    steps:
++      - name: Checkout
++        uses: actions/checkout@v4
++
++      - name: Set up Node.js
++        uses: actions/setup-node@v4
++        with:
++          node-version: '18'
++
++      - name: Set up Python
++        uses: actions/setup-python@v5
++        with:
++          python-version: '3.12'
++          cache: 'pip'
++
++      - name: Install Python dependencies
++        run: |
++          pip install -r requirements.txt
++          pip install -r requirements-dev.txt
++
++      - name: Install AWS CDK CLI
++        run: npm install -g aws-cdk
++
++      - name: Log in to GHCR
++        uses: docker/login-action@v3
++        with:
++          registry: ghcr.io
++          username: ${{ github.actor }}
++          password: ${{ secrets.GITHUB_TOKEN }}
++
++      - name: Build and push image
++        uses: docker/build-push-action@v5
++        with:
++          context: .
++          push: true
++          tags: |
++            ${{ env.IMAGE_NAME }}:${{ github.sha }}
++            ${{ env.IMAGE_NAME }}:latest
++
++      - name: Configure AWS credentials
++        uses: aws-actions/configure-aws-credentials@v4
++        with:
++          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
++          role-session-name: vehicle-anomaly-api-ci
++          aws-region: ${{ env.AWS_REGION }}
++
++      - name: CDK synth
++        working-directory: deploy/cdk
++        run: |
++          cdk synth \
++            -c image_uri=${{ env.IMAGE_NAME }}:${{ github.sha }} \
++            -c environment=prod \
++            -c desired_count=2 \
++            -c min_capacity=1 \
++            -c max_capacity=4
++
++      - name: CDK diff
++        working-directory: deploy/cdk
++        run: |
++          cdk diff \
++            -c image_uri=${{ env.IMAGE_NAME }}:${{ github.sha }} \
++            -c environment=prod \
++            -c desired_count=2 \
++            -c min_capacity=1 \
++            -c max_capacity=4
++
++      - name: CDK deploy
++        working-directory: deploy/cdk
++        run: |
++          cdk deploy \
++            --require-approval never \
++            -c image_uri=${{ env.IMAGE_NAME }}:${{ github.sha }} \
++            -c environment=prod \
++            -c desired_count=2 \
++            -c min_capacity=1 \
++            -c max_capacity=4
+diff --git a/Dockerfile b/Dockerfile
+index 811c87af1005f31b3dcb1f133ce89df52cccd77f..f74a3c2f2e0b67072b459017ec710a196e30d1ba 100644
+--- a/Dockerfile
++++ b/Dockerfile
+@@ -27,29 +27,29 @@ FROM python:3.12-slim AS production
+ ENV PYTHONDONTWRITEBYTECODE=1 \
+     PYTHONUNBUFFERED=1 \
+     PATH="/opt/venv/bin:$PATH"
+ 
+ # Create non-root user
+ RUN groupadd -r appuser && useradd -r -g appuser appuser
+ 
+ # Copy virtual environment from builder stage
+ COPY --from=builder /opt/venv /opt/venv
+ 
+ # Set working directory
+ WORKDIR /app
+ 
+ # Copy application code
+ COPY app/ ./app/
+ 
+ # Change ownership to non-root user
+ RUN chown -R appuser:appuser /app
+ USER appuser
+ 
+ # Expose port
+ EXPOSE 8000
+ 
+ # Health check
+ HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
+-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" || exit 1
++    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')" || exit 1
+ 
+ # Run the application
+ CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+diff --git a/app/api/routes/health.py b/app/api/routes/health.py
+index c24aca941a66d9a7f089fa0b4c864bb673753558..eeb3a655978e9d45bd9451294d924d8222054c8a 100644
+--- a/app/api/routes/health.py
++++ b/app/api/routes/health.py
+@@ -1,36 +1,42 @@
+ import logging
+ 
+ from fastapi import APIRouter, Depends, HTTPException
+ from sqlalchemy.ext.asyncio import AsyncSession
+ 
+ from app.config import settings
+ from app.core.database import check_database_health, get_database
+ 
+ logger = logging.getLogger(__name__)
+ router = APIRouter()
+ 
+ 
+-@router.get("/")
++@router.get("/health")
+ async def health_check():
+     """Basic health check endpoint."""
+     return {
+         "status": "healthy",
+         "version": settings.app_version,
+         "environment": settings.environment,
+     }
+ 
+ 
+-@router.get("/ready")
++@router.get("/health/ready")
+ async def readiness_check(db: AsyncSession | None = Depends(get_database)):
+     """Readiness check endpoint that includes database connectivity."""
+     db_status = await check_database_health()
+ 
+     if not db_status:
+         raise HTTPException(status_code=503, detail="Database is not available")
+ 
+     return {
+         "status": "ready",
+         "version": settings.app_version,
+         "environment": settings.environment,
+         "database": "connected" if settings.database_url else "not configured",
+     }
++
++
++@router.get("/healthz")
++async def liveness_probe():
++    """Kubernetes/ECS-style liveness probe."""
++    return {"status": "ok"}
+diff --git a/app/api/routes/ingest.py b/app/api/routes/ingest.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..e9d62a4f43b9fe6bfa714b42c016a04193f598bf
+--- /dev/null
++++ b/app/api/routes/ingest.py
+@@ -0,0 +1,29 @@
++"""Telemetry ingestion endpoint for training isolation forest models."""
++
++from __future__ import annotations
++
++import logging
++
++from fastapi import APIRouter, Depends, HTTPException, status
++
++from app.domain import ModelTrainingResponse, TelemetryBatch
++from app.services.scoring import IsolationForestScoringService, get_scoring_service
++
++logger = logging.getLogger(__name__)
++router = APIRouter()
++
++
++@router.post("/ingest", response_model=ModelTrainingResponse, status_code=status.HTTP_201_CREATED)
++async def ingest_telemetry(
++    batch: TelemetryBatch, service: IsolationForestScoringService = Depends(get_scoring_service)
++) -> ModelTrainingResponse:
++    """Train or update the anomaly detection model with a batch of telemetry data."""
++
++    try:
++        result = service.train(batch)
++    except ValueError as exc:  # pragma: no cover - defensive guard
++        logger.warning("Telemetry batch rejected: %s", exc)
++        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
++
++    logger.info("Telemetry ingestion completed for version %s", result.model_version)
++    return result
+diff --git a/app/api/routes/score.py b/app/api/routes/score.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..b810a995bfdf10bd551af4ddf96793e3159750c5
+--- /dev/null
++++ b/app/api/routes/score.py
+@@ -0,0 +1,36 @@
++"""Anomaly scoring endpoint for telemetry records."""
++
++from __future__ import annotations
++
++import logging
++
++from fastapi import APIRouter, Depends, HTTPException, status
++
++from app.domain import ScoreRequest, ScoreResponse
++from app.services.scoring import IsolationForestScoringService, get_scoring_service
++
++logger = logging.getLogger(__name__)
++router = APIRouter()
++
++
++@router.post("/score", response_model=ScoreResponse, status_code=status.HTTP_200_OK)
++async def score_telemetry(
++    request: ScoreRequest, service: IsolationForestScoringService = Depends(get_scoring_service)
++) -> ScoreResponse:
++    """Score a telemetry record for anomalies using the configured isolation forest model."""
++
++    try:
++        response = service.score(request)
++    except FileNotFoundError as exc:
++        logger.error("Model version not available: %s", exc)
++        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
++    except (TypeError, ValueError) as exc:  # pragma: no cover - defensive guard
++        logger.exception("Failed to score telemetry")
++        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
++
++    logger.info(
++        "Telemetry scored for vehicle %s with version %s",
++        response.vehicle_id,
++        response.model_version,
++    )
++    return response
+diff --git a/app/config.py b/app/config.py
+index 527fdcbf96994e2ae73a2d2fa2ff36b95a91aed4..204825a8ceb1e5f3d21ae24f42880832df3aecc3 100644
+--- a/app/config.py
++++ b/app/config.py
+@@ -5,36 +5,37 @@ from pydantic_settings import BaseSettings
+ 
+ 
+ class Settings(BaseSettings):
+     """Application settings loaded from environment variables."""
+ 
+     # Application
+     app_name: str = "FastAPI Template"
+     app_version: str = "0.1.0"
+     environment: str = "development"
+     debug: bool = True
+     log_level: str = "INFO"
+ 
+     # Database
+     database_url: str | None = None
+ 
+     # Security
+     secret_key: str = ""  # Will be generated if empty
+     cors_origins: list[str] = []  # Empty by default for security
+ 
+     # Sentry
+     sentry_dsn: str | None = None
+ 
+     # Server
+     host: str = "0.0.0.0"
+     port: int = 8000
++    model_artifact_dir: str = "artifacts"
+ 
+     def __init__(self, **kwargs):
+         super().__init__(**kwargs)
+         # Generate a random secret key if not provided
+         if not self.secret_key:
+             self.secret_key = secrets.token_urlsafe(32)
+ 
+     model_config = ConfigDict(env_file=".env", case_sensitive=False)
+ 
+ 
+ settings = Settings()
+diff --git a/app/domain/__init__.py b/app/domain/__init__.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..34cbde1a5344fdf1ee5f065f5bac992d963629a8
+--- /dev/null
++++ b/app/domain/__init__.py
+@@ -0,0 +1,19 @@
++"""Domain models for the vehicle anomaly API."""
++
++from .telemetry import (
++    IsolationForestMetadata,
++    ModelTrainingResponse,
++    ScoreRequest,
++    ScoreResponse,
++    TelemetryBatch,
++    TelemetryRecord,
++)
++
++__all__ = [
++    "IsolationForestMetadata",
++    "ModelTrainingResponse",
++    "ScoreRequest",
++    "ScoreResponse",
++    "TelemetryBatch",
++    "TelemetryRecord",
++]
+diff --git a/app/domain/telemetry.py b/app/domain/telemetry.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..7e6f1ae5a205979f4913dae5b76a01406bf17c6c
+--- /dev/null
++++ b/app/domain/telemetry.py
+@@ -0,0 +1,67 @@
++"""Telemetry domain models for isolation forest scoring."""
++
++from __future__ import annotations
++
++from datetime import datetime
++from typing import Annotated, Self
++
++from pydantic import BaseModel, Field, model_validator
++
++
++class TelemetryRecord(BaseModel):
++    """Represents a single telemetry measurement for a vehicle."""
++
++    vehicle_id: Annotated[str, Field(min_length=1, max_length=64)]
++    timestamp: datetime
++    feature_vector: Annotated[list[float], Field(min_length=1)]
++
++    @model_validator(mode="after")
++    def validate_feature_vector(self) -> Self:
++        """Ensure the feature vector is numeric."""
++        if not all(isinstance(value, float | int) for value in self.feature_vector):
++            msg = "feature_vector must contain only numeric values"
++            raise ValueError(msg)
++        # Coerce ints to floats to keep downstream numpy happy
++        self.feature_vector = [float(value) for value in self.feature_vector]
++        return self
++
++
++class TelemetryBatch(BaseModel):
++    """Batch payload used to train or update the isolation forest."""
++
++    records: Annotated[list[TelemetryRecord], Field(min_length=1)]
++    model_version: Annotated[str | None, Field(default=None, max_length=128)] = None
++
++
++class IsolationForestMetadata(BaseModel):
++    """Metadata that accompanies a trained isolation forest artifact."""
++
++    model_version: Annotated[str, Field(min_length=1, max_length=128)]
++    trained_at: datetime
++    n_estimators: int
++    contamination: float
++    n_features: int
++
++
++class ModelTrainingResponse(BaseModel):
++    """Response returned by the ingestion endpoint after training."""
++
++    model_version: str
++    record_count: int
++    metadata: IsolationForestMetadata
++
++
++class ScoreRequest(TelemetryRecord):
++    """Request payload for scoring a single telemetry record."""
++
++    model_version: Annotated[str | None, Field(default=None, max_length=128)] = None
++
++
++class ScoreResponse(BaseModel):
++    """Response payload for anomaly scoring."""
++
++    vehicle_id: str
++    timestamp: datetime
++    model_version: str
++    anomaly_score: float
++    is_anomaly: bool
+diff --git a/app/instrumentation/__init__.py b/app/instrumentation/__init__.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..1df5f1cfa13760a7646d87107790e1e28165539d
+--- /dev/null
++++ b/app/instrumentation/__init__.py
+@@ -0,0 +1,5 @@
++"""Instrumentation utilities for the FastAPI application."""
++
++from .otel import init_tracing
++
++__all__ = ["init_tracing"]
+diff --git a/app/instrumentation/otel.py b/app/instrumentation/otel.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..19b588d92bea4682de29bcaa18c82aebce9e85b2
+--- /dev/null
++++ b/app/instrumentation/otel.py
+@@ -0,0 +1,52 @@
++"""OpenTelemetry instrumentation setup for the FastAPI application."""
++
++from __future__ import annotations
++
++import os
++import threading
++from typing import Final
++
++from fastapi import FastAPI
++from opentelemetry import trace
++from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
++from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
++from opentelemetry.sdk.resources import Resource
++from opentelemetry.sdk.trace import TracerProvider
++from opentelemetry.sdk.trace.export import BatchSpanProcessor
++
++from app.config import settings
++
++_INITIALISED_LOCK: Final = threading.Lock()
++_INITIALISED: bool = False
++
++
++def init_tracing(app: FastAPI) -> None:
++    """Initialise OpenTelemetry tracing for the FastAPI app."""
++
++    global _INITIALISED
++    if _INITIALISED:
++        return
++
++    with _INITIALISED_LOCK:
++        if _INITIALISED:
++            return
++
++        endpoint = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317")
++        insecure = os.getenv("OTEL_EXPORTER_OTLP_INSECURE", "true").lower() == "true"
++
++        resource = Resource.create(
++            {
++                "service.name": settings.app_name,
++                "service.version": settings.app_version,
++                "deployment.environment": settings.environment,
++            }
++        )
++
++        tracer_provider = TracerProvider(resource=resource)
++        span_processor = BatchSpanProcessor(OTLPSpanExporter(endpoint=endpoint, insecure=insecure))
++        tracer_provider.add_span_processor(span_processor)
++        trace.set_tracer_provider(tracer_provider)
++
++        FastAPIInstrumentor.instrument_app(app, tracer_provider=tracer_provider)
++
++        _INITIALISED = True
+diff --git a/app/main.py b/app/main.py
+index f05a9b359c2c7e93ed7fdd1c1915be194703f0c6..0ebdb485e7703007cf6c7b8ed789e6745b18fd94 100644
+--- a/app/main.py
++++ b/app/main.py
+@@ -1,39 +1,40 @@
+ import logging
+ from contextlib import asynccontextmanager
+ 
+ import sentry_sdk
+ from fastapi import FastAPI, Request
+ from fastapi.middleware.cors import CORSMiddleware
+ from fastapi.middleware.trustedhost import TrustedHostMiddleware
+ from sentry_sdk.integrations.fastapi import FastApiIntegration
+ from sentry_sdk.integrations.logging import LoggingIntegration
+ 
+-from app.api.routes import example, health
++from app.api.routes import example, health, ingest, score
+ from app.config import settings
+ from app.core.database import init_database
+ from app.core.metrics import setup_metrics
++from app.instrumentation import init_tracing
+ 
+ # Configure logging
+ logging.basicConfig(
+     level=getattr(logging, settings.log_level.upper()),
+     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+ )
+ logger = logging.getLogger(__name__)
+ 
+ 
+ @asynccontextmanager
+ async def lifespan(app: FastAPI):
+     """Application lifespan events."""
+     # Startup
+     logger.info(f"Starting {settings.app_name} v{settings.app_version}")
+ 
+     # Initialize Sentry if DSN is provided
+     if settings.sentry_dsn:
+         sentry_sdk.init(
+             dsn=settings.sentry_dsn,
+             integrations=[
+                 FastApiIntegration(auto_enabling_instrumentations=False),
+                 LoggingIntegration(level=logging.INFO),
+             ],
+             traces_sample_rate=0.1,
+             environment=settings.environment,
+@@ -64,42 +65,45 @@ app = FastAPI(
+ if settings.cors_origins:
+     app.add_middleware(
+         CORSMiddleware,
+         allow_origins=settings.cors_origins,
+         allow_credentials=True,
+         allow_methods=["*"],
+         allow_headers=["*"],
+     )
+ 
+ # Add security middleware
+ app.add_middleware(
+     TrustedHostMiddleware, allowed_hosts=["*"] if settings.debug else ["localhost", "127.0.0.1"]
+ )
+ 
+ 
+ # Request logging middleware
+ @app.middleware("http")
+ async def log_requests(request: Request, call_next):
+     """Log all requests."""
+     logger.info(f"{request.method} {request.url.path}")
+     response = await call_next(request)
+     logger.info(f"Response status: {response.status_code}")
+     return response
+ 
+ 
+-# Setup metrics
++# Observability hooks
++init_tracing(app)
+ setup_metrics(app)
+-logger.info("Prometheus metrics enabled")
++logger.info("OpenTelemetry tracing and Prometheus metrics enabled")
+ 
+ # Include routers
+-app.include_router(health.router, prefix="/health", tags=["health"])
++app.include_router(health.router, tags=["health"])
+ app.include_router(example.router, prefix="/api", tags=["example"])
++app.include_router(ingest.router, tags=["telemetry"])
++app.include_router(score.router, tags=["telemetry"])
+ 
+ 
+ @app.get("/")
+ async def root():
+     """Root endpoint."""
+     return {
+         "message": f"Welcome to {settings.app_name}",
+         "version": settings.app_version,
+         "environment": settings.environment,
+     }
+diff --git a/app/services/scoring.py b/app/services/scoring.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..deae292d7ed617ccadb317cf0b940972f6e27307
+--- /dev/null
++++ b/app/services/scoring.py
+@@ -0,0 +1,162 @@
++"""Isolation Forest scoring and model management service."""
++
++from __future__ import annotations
++
++import logging
++from collections.abc import Iterable
++from dataclasses import dataclass
++from datetime import UTC, datetime
++from pathlib import Path
++
++import joblib
++import numpy as np
++from sklearn.ensemble import IsolationForest
++
++from app.config import settings
++from app.domain import (
++    IsolationForestMetadata,
++    ModelTrainingResponse,
++    ScoreRequest,
++    ScoreResponse,
++    TelemetryBatch,
++    TelemetryRecord,
++)
++
++logger = logging.getLogger(__name__)
++
++
++@dataclass(slots=True)
++class IsolationForestConfig:
++    """Configuration options for the IsolationForest model."""
++
++    n_estimators: int = 200
++    contamination: float = 0.05
++    random_state: int = 42
++
++
++class IsolationForestScoringService:
++    """Service responsible for training and scoring telemetry data."""
++
++    def __init__(self, artifact_dir: str | Path, config: IsolationForestConfig | None = None):
++        self.artifact_dir = Path(artifact_dir)
++        self.artifact_dir.mkdir(parents=True, exist_ok=True)
++        self.latest_file = self.artifact_dir / "LATEST"
++        self.config = config or IsolationForestConfig()
++
++    # ------------------------------------------------------------------
++    # Artifact helpers
++    # ------------------------------------------------------------------
++    def _model_path(self, version: str) -> Path:
++        return self.artifact_dir / f"isolation_forest_{version}.joblib"
++
++    def _metadata_path(self, version: str) -> Path:
++        return self.artifact_dir / f"isolation_forest_{version}.metadata.json"
++
++    def _write_latest_version(self, version: str) -> None:
++        self.latest_file.write_text(version, encoding="utf-8")
++
++    def _read_latest_version(self) -> str:
++        if not self.latest_file.exists():
++            msg = "No trained model available"
++            raise FileNotFoundError(msg)
++        return self.latest_file.read_text(encoding="utf-8").strip()
++
++    # ------------------------------------------------------------------
++    # Training
++    # ------------------------------------------------------------------
++    def train(self, batch: TelemetryBatch) -> ModelTrainingResponse:
++        """Train an IsolationForest model using a batch of telemetry records."""
++
++        feature_matrix = self._to_matrix(batch.records)
++        if feature_matrix.size == 0:
++            msg = "Telemetry batch must contain records"
++            raise ValueError(msg)
++
++        model_version = batch.model_version or datetime.now(tz=UTC).strftime("%Y%m%d%H%M%S")
++        model = IsolationForest(
++            n_estimators=self.config.n_estimators,
++            contamination=self.config.contamination,
++            random_state=self.config.random_state,
++        )
++        model.fit(feature_matrix)
++
++        artifact_path = self._model_path(model_version)
++        joblib.dump(model, artifact_path)
++        logger.info("IsolationForest model persisted at %s", artifact_path)
++
++        metadata = IsolationForestMetadata(
++            model_version=model_version,
++            trained_at=datetime.now(tz=UTC),
++            n_estimators=self.config.n_estimators,
++            contamination=self.config.contamination,
++            n_features=feature_matrix.shape[1],
++        )
++        joblib.dump(metadata.model_dump(), self._metadata_path(model_version))
++        logger.debug("Metadata persisted for model version %s", model_version)
++
++        self._write_latest_version(model_version)
++        logger.info("Updated latest model pointer to version %s", model_version)
++
++        return ModelTrainingResponse(
++            model_version=model_version,
++            record_count=len(batch.records),
++            metadata=metadata,
++        )
++
++    # ------------------------------------------------------------------
++    # Scoring
++    # ------------------------------------------------------------------
++    def score(self, request: ScoreRequest) -> ScoreResponse:
++        """Score a single telemetry record using the requested model version."""
++
++        model_version = request.model_version or self._read_latest_version()
++        model = self._load_model(model_version)
++
++        feature_vector = np.array(request.feature_vector, dtype=float).reshape(1, -1)
++        anomaly_score = float(model.decision_function(feature_vector)[0])
++        is_anomaly = bool(model.predict(feature_vector)[0] == -1)
++
++        return ScoreResponse(
++            vehicle_id=request.vehicle_id,
++            timestamp=request.timestamp,
++            model_version=model_version,
++            anomaly_score=anomaly_score,
++            is_anomaly=is_anomaly,
++        )
++
++    # ------------------------------------------------------------------
++    # Internal helpers
++    # ------------------------------------------------------------------
++    def _load_model(self, version: str) -> IsolationForest:
++        path = self._model_path(version)
++        if not path.exists():
++            msg = f"Model version '{version}' is not available"
++            raise FileNotFoundError(msg)
++        model = joblib.load(path)
++        if not isinstance(model, IsolationForest):
++            msg = f"Artifact at {path} is not an IsolationForest model"
++            raise TypeError(msg)
++        return model
++
++    @staticmethod
++    def _to_matrix(records: Iterable[TelemetryRecord]) -> np.ndarray:
++        return np.array([record.feature_vector for record in records], dtype=float)
++
++
++_service_instance: IsolationForestScoringService | None = None
++
++
++def get_scoring_service() -> IsolationForestScoringService:
++    """Return a singleton scoring service instance."""
++
++    global _service_instance
++    if _service_instance is None:
++        _service_instance = IsolationForestScoringService(settings.model_artifact_dir)
++    return _service_instance
++
++
++def reset_scoring_service() -> None:
++    """Reset the cached scoring service instance (useful for tests)."""
++
++    global _service_instance
++    _service_instance = None
+diff --git a/deploy/cdk/app.py b/deploy/cdk/app.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..2a76628304e4643cafb7fadd887fb1479b0df73a
+--- /dev/null
++++ b/deploy/cdk/app.py
+@@ -0,0 +1,18 @@
++#!/usr/bin/env python3
++"""CDK application entrypoint for the vehicle anomaly API."""
++
++from __future__ import annotations
++
++from aws_cdk import App, Environment
++
++from stacks.fargate_stack import VehicleAnomalyFargateStack
++
++app = App()
++
++account = app.node.try_get_context("account")
++region = app.node.try_get_context("region")
++stack_env = Environment(account=account, region=region) if account or region else None
++
++VehicleAnomalyFargateStack(app, "VehicleAnomalyFargate", env=stack_env)
++
++app.synth()
+diff --git a/deploy/cdk/cdk.json b/deploy/cdk/cdk.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..0dc2cc3daaea11af9072fe776f1f9b315783e906
+--- /dev/null
++++ b/deploy/cdk/cdk.json
+@@ -0,0 +1,10 @@
++{
++  "app": "python3 app.py",
++  "context": {
++    "image_uri": "ghcr.io/armanshirzad/vehicle-anomaly-api:latest",
++    "environment": "prod",
++    "desired_count": 2,
++    "min_capacity": 1,
++    "max_capacity": 4
++  }
++}
+diff --git a/deploy/cdk/stacks/fargate_stack.py b/deploy/cdk/stacks/fargate_stack.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..a2152691f55b02ead4fe56368eb3ab92a9302281
+--- /dev/null
++++ b/deploy/cdk/stacks/fargate_stack.py
+@@ -0,0 +1,154 @@
++"""CDK stack provisioning the vehicle anomaly API on AWS Fargate."""
++
++from __future__ import annotations
++
++from textwrap import dedent
++
++from aws_cdk import (
++    Duration,
++    RemovalPolicy,
++    Stack,
++    aws_certificatemanager as acm,
++    aws_ec2 as ec2,
++    aws_ecs as ecs,
++    aws_ecs_patterns as ecs_patterns,
++    aws_elasticloadbalancingv2 as elbv2,
++    aws_iam as iam,
++    aws_logs as logs,
++)
++from constructs import Construct
++
++
++class VehicleAnomalyFargateStack(Stack):
++    """Deploy the API behind an application load balancer on AWS Fargate."""
++
++    def __init__(self, scope: Construct, construct_id: str, **kwargs):
++        super().__init__(scope, construct_id, **kwargs)
++
++        vpc = ec2.Vpc(self, "Vpc", max_azs=2)
++
++        image_uri = self.node.try_get_context("image_uri") or "ghcr.io/armanshirzad/vehicle-anomaly-api:latest"
++        container_port = int(self.node.try_get_context("container_port") or 8000)
++
++        execution_role = iam.Role(
++            self,
++            "ExecutionRole",
++            assumed_by=iam.ServicePrincipal("ecs-tasks.amazonaws.com"),
++            managed_policies=[
++                iam.ManagedPolicy.from_aws_managed_policy_name("service-role/AmazonECSTaskExecutionRolePolicy"),
++            ],
++        )
++
++        task_role = iam.Role(
++            self,
++            "TaskRole",
++            assumed_by=iam.ServicePrincipal("ecs-tasks.amazonaws.com"),
++        )
++        task_role.add_managed_policy(
++            iam.ManagedPolicy.from_aws_managed_policy_name("CloudWatchAgentServerPolicy")
++        )
++        task_role.add_managed_policy(
++            iam.ManagedPolicy.from_aws_managed_policy_name("AWSXRayDaemonWriteAccess")
++        )
++
++        log_group = logs.LogGroup(
++            self,
++            "ServiceLogs",
++            retention=logs.RetentionDays.ONE_WEEK,
++            log_group_name="/aws/ecs/vehicle-anomaly-api",
++            removal_policy=RemovalPolicy.RETAIN,
++        )
++
++        service = ecs_patterns.ApplicationLoadBalancedFargateService(
++            self,
++            "VehicleAnomalyService",
++            vpc=vpc,
++            public_load_balancer=True,
++            assign_public_ip=True,
++            cpu=256,
++            memory_limit_mib=512,
++            desired_count=int(self.node.try_get_context("desired_count") or 2),
++            task_image_options=ecs_patterns.ApplicationLoadBalancedTaskImageOptions(
++                image=ecs.ContainerImage.from_registry(image_uri),
++                container_port=container_port,
++                environment={
++                    "ENVIRONMENT": self.node.try_get_context("environment") or "prod",
++                },
++                task_role=task_role,
++                execution_role=execution_role,
++                log_driver=ecs.AwsLogDriver(stream_prefix="api", log_group=log_group),
++            ),
++            health_check_grace_period=Duration.seconds(60),
++        )
++
++        service.target_group.configure_health_check(path="/healthz", healthy_http_codes="200")
++
++        scalable_target = service.service.auto_scale_task_count(
++            min_capacity=int(self.node.try_get_context("min_capacity") or 1),
++            max_capacity=int(self.node.try_get_context("max_capacity") or 4),
++        )
++        scalable_target.scale_on_cpu_utilization(
++            "CpuScaling",
++            target_utilization_percent=60,
++            scale_in_cooldown=Duration.minutes(2),
++            scale_out_cooldown=Duration.minutes(1),
++        )
++
++        _collector_container = service.task_definition.add_container(
++            "AdotCollector",
++            image=ecs.ContainerImage.from_registry(
++                self.node.try_get_context("adot_image")
++                or "public.ecr.aws/aws-observability/aws-otel-collector:latest"
++            ),
++            essential=True,
++            logging=ecs.LogDrivers.aws_logs(stream_prefix="adot", log_group=log_group),
++            environment={
++                "AWS_REGION": Stack.of(self).region,
++                "AOT_CONFIG_CONTENT": dedent(
++                    """
++                    receivers:
++                      otlp:
++                        protocols:
++                          grpc:
++                            endpoint: 0.0.0.0:4317
++                    processors:
++                      batch: {}
++                    exporters:
++                      awsxray: {}
++                      awsemf: {}
++                    service:
++                      pipelines:
++                        traces:
++                          receivers: [otlp]
++                          processors: [batch]
++                          exporters: [awsxray]
++                        metrics:
++                          receivers: [otlp]
++                          processors: [batch]
++                          exporters: [awsemf]
++                    """
++                ).strip(),
++            },
++            port_mappings=[ecs.PortMapping(container_port=4317, host_port=4317, protocol=ecs.Protocol.TCP)],
++        )
++
++        certificate_arn = self.node.try_get_context("certificate_arn")
++        if certificate_arn:
++            certificate = acm.Certificate.from_certificate_arn(self, "AlbCertificate", certificate_arn)
++            https_listener = service.load_balancer.add_listener(
++                "HttpsListener",
++                port=443,
++                certificates=[certificate],
++                open=True,
++                protocol=elbv2.ApplicationProtocol.HTTPS,
++            )
++            https_listener.add_targets(
++                "HttpsTargets",
++                port=container_port,
++                targets=[service.service],
++                health_check=elbv2.HealthCheck(path="/healthz", healthy_http_codes="200"),
++            )
++
++        service.load_balancer.connections.allow_from_any_ipv4(ec2.Port.tcp(443), "Allow HTTPS inbound")
++        service.load_balancer.connections.allow_from_any_ipv4(ec2.Port.tcp(80), "Allow HTTP inbound")
++
+diff --git a/requirements-dev.txt b/requirements-dev.txt
+index e98629f2b28f903b4ea96a5367a119f0ad5efeab..4071cada6d3cd257e5eb1bcec4721f70f20c4000 100644
+--- a/requirements-dev.txt
++++ b/requirements-dev.txt
+@@ -1,5 +1,7 @@
+ pytest==8.4.2
+ pytest-asyncio==1.2.0
+ pytest-cov==4.1.0
+ httpx==0.25.2
+ ruff==0.1.6
++aws-cdk-lib==2.150.0
++constructs==10.3.0
+diff --git a/requirements.txt b/requirements.txt
+index e2601f16341c713a101e32b0be299977eefb2650..58eb40e246ed9a5310b88180a7c4da479ea9d61c 100644
+--- a/requirements.txt
++++ b/requirements.txt
+@@ -1,9 +1,15 @@
+ fastapi[standard]==0.104.1
+ uvicorn[standard]==0.24.0
+ pydantic-settings==2.1.0
+ sqlalchemy[asyncio]==2.0.23
+ asyncpg==0.30.0
+ psycopg2-binary==2.9.9
+ sentry-sdk[fastapi]==2.42.0
+ prometheus-fastapi-instrumentator==6.1.0
+ python-dotenv==1.1.1
++scikit-learn==1.5.2
++joblib==1.4.2
++opentelemetry-api==1.27.0
++opentelemetry-sdk==1.27.0
++opentelemetry-exporter-otlp-proto-grpc==1.27.0
++opentelemetry-instrumentation-fastapi==0.48b0
+diff --git a/tests/conftest.py b/tests/conftest.py
+index 12a9a9387bce3620e53ad252d49ffc94d4c2576b..6fb246029847467c0890706e175a4c603f19f75b 100644
+--- a/tests/conftest.py
++++ b/tests/conftest.py
+@@ -1,16 +1,32 @@
+ import pytest
+ from fastapi.testclient import TestClient
+ 
++from app.config import settings
+ from app.main import app
++from app.services.scoring import reset_scoring_service
+ 
+ 
+ @pytest.fixture
+ def client():
+     """Create test client."""
+     return TestClient(app)
+ 
+ 
+ @pytest.fixture
+ def sample_item():
+     """Sample item data for testing."""
+     return {"name": "Test Item", "description": "A test item", "price": 9.99}
++
++
++@pytest.fixture(autouse=True)
++def isolated_artifact_dir(tmp_path, monkeypatch):
++    """Ensure model artifacts are written to a temporary directory for each test run."""
++
++    original_dir = settings.model_artifact_dir
++    monkeypatch.setattr(settings, "model_artifact_dir", str(tmp_path))
++    reset_scoring_service()
++    try:
++        yield
++    finally:
++        monkeypatch.setattr(settings, "model_artifact_dir", original_dir)
++        reset_scoring_service()
+diff --git a/tests/test_health.py b/tests/test_health.py
+index fb33eac2b981af20be5a275eb8f1de41e87df9a8..b5907a2e770fe48ea1da87ee239a603517f4d4b2 100644
+--- a/tests/test_health.py
++++ b/tests/test_health.py
+@@ -10,50 +10,57 @@ def test_root_endpoint(client: TestClient):
+     assert "version" in data
+     assert "environment" in data
+ 
+ 
+ def test_health_check(client: TestClient):
+     """Test health check endpoint."""
+     response = client.get("/health")
+     assert response.status_code == 200
+     data = response.json()
+     assert data["status"] == "healthy"
+     assert "version" in data
+     assert "environment" in data
+ 
+ 
+ def test_readiness_check(client: TestClient):
+     """Test readiness check endpoint."""
+     response = client.get("/health/ready")
+     assert response.status_code == 200
+     data = response.json()
+     assert data["status"] == "ready"
+     assert "version" in data
+     assert "environment" in data
+     assert "database" in data
+ 
+ 
++def test_healthz(client: TestClient):
++    """Test liveness probe endpoint."""
++    response = client.get("/healthz")
++    assert response.status_code == 200
++    assert response.json()["status"] == "ok"
++
++
+ def test_metrics_endpoint(client: TestClient):
+     """Test Prometheus metrics endpoint."""
+     response = client.get("/metrics")
+     assert response.status_code == 200
+     assert "text/plain" in response.headers["content-type"]
+ 
+ 
+ def test_example_items_list(client: TestClient):
+     """Test listing items."""
+     response = client.get("/api/items")
+     assert response.status_code == 200
+     assert isinstance(response.json(), list)
+ 
+ 
+ def test_example_item_crud(client: TestClient, sample_item):
+     """Test CRUD operations for items."""
+     # Create item
+     response = client.post("/api/items", json=sample_item)
+     assert response.status_code == 201
+     created_item = response.json()
+     assert created_item["name"] == sample_item["name"]
+     assert created_item["price"] == sample_item["price"]
+     item_id = created_item["id"]
+ 
+     # Get item
+diff --git a/tests/test_scoring.py b/tests/test_scoring.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..a70a652247dd8085283e4131d2d7cd22ce639bcf
+--- /dev/null
++++ b/tests/test_scoring.py
+@@ -0,0 +1,84 @@
++from __future__ import annotations
++
++from datetime import UTC, datetime
++
++from fastapi.testclient import TestClient
++
++
++def _sample_batch():
++    timestamp = datetime.now(tz=UTC).isoformat()
++    return {
++        "records": [
++            {
++                "vehicle_id": "vehicle-1",
++                "timestamp": timestamp,
++                "feature_vector": [0.1, 0.2, 0.3],
++            },
++            {
++                "vehicle_id": "vehicle-2",
++                "timestamp": timestamp,
++                "feature_vector": [0.15, 0.22, 0.31],
++            },
++            {
++                "vehicle_id": "vehicle-3",
++                "timestamp": timestamp,
++                "feature_vector": [0.12, 0.19, 0.29],
++            },
++        ]
++    }
++
++
++def test_ingest_creates_model(client: TestClient):
++    response = client.post("/ingest", json=_sample_batch())
++    assert response.status_code == 201
++    body = response.json()
++    assert body["record_count"] == 3
++    assert "model_version" in body
++    assert body["metadata"]["n_features"] == 3
++
++
++def test_score_uses_latest_model_by_default(client: TestClient):
++    ingest_response = client.post("/ingest", json=_sample_batch())
++    model_version = ingest_response.json()["model_version"]
++
++    telemetry = {
++        "vehicle_id": "vehicle-1",
++        "timestamp": datetime.now(tz=UTC).isoformat(),
++        "feature_vector": [0.13, 0.2, 0.28],
++    }
++
++    score_response = client.post("/score", json=telemetry)
++    assert score_response.status_code == 200
++    body = score_response.json()
++    assert body["model_version"] == model_version
++    assert isinstance(body["anomaly_score"], float)
++    assert isinstance(body["is_anomaly"], bool)
++
++
++def test_score_specific_version(client: TestClient):
++    ingest_response = client.post("/ingest", json=_sample_batch())
++    model_version = ingest_response.json()["model_version"]
++
++    telemetry = {
++        "vehicle_id": "vehicle-2",
++        "timestamp": datetime.now(tz=UTC).isoformat(),
++        "feature_vector": [0.16, 0.21, 0.27],
++        "model_version": model_version,
++    }
++
++    score_response = client.post("/score", json=telemetry)
++    assert score_response.status_code == 200
++    assert score_response.json()["model_version"] == model_version
++
++
++def test_score_unknown_version_returns_404(client: TestClient):
++    telemetry = {
++        "vehicle_id": "vehicle-2",
++        "timestamp": datetime.now(tz=UTC).isoformat(),
++        "feature_vector": [0.16, 0.21, 0.27],
++        "model_version": "non-existent",
++    }
++
++    response = client.post("/score", json=telemetry)
++    assert response.status_code == 404
++    assert "not available" in response.json()["detail"]
+ 
+EOF
+)

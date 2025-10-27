@@ -1,0 +1,97 @@
+name: Deploy to AWS Fargate
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+  packages: write
+
+env:
+  IMAGE_NAME: ghcr.io/${{ github.repository }}
+  AWS_REGION: us-east-1
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install Python dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+
+      - name: Install AWS CDK CLI
+        run: npm install -g aws-cdk
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:${{ github.sha }}
+            ${{ env.IMAGE_NAME }}:latest
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          role-session-name: vehicle-anomaly-api-ci
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: CDK synth
+        working-directory: deploy/cdk
+        run: |
+          cdk synth \
+            -c image_uri=${{ env.IMAGE_NAME }}:${{ github.sha }} \
+            -c environment=prod \
+            -c desired_count=2 \
+            -c min_capacity=1 \
+            -c max_capacity=4
+
+      - name: CDK diff
+        working-directory: deploy/cdk
+        run: |
+          cdk diff \
+            -c image_uri=${{ env.IMAGE_NAME }}:${{ github.sha }} \
+            -c environment=prod \
+            -c desired_count=2 \
+            -c min_capacity=1 \
+            -c max_capacity=4
+
+      - name: CDK deploy
+        working-directory: deploy/cdk
+        run: |
+          cdk deploy \
+            --require-approval never \
+            -c image_uri=${{ env.IMAGE_NAME }}:${{ github.sha }} \
+            -c environment=prod \
+            -c desired_count=2 \
+            -c min_capacity=1 \
+            -c max_capacity=4
+

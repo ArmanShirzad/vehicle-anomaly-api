@@ -1,0 +1,11 @@
+{
+  "app": "python3 app.py",
+  "context": {
+    "image_uri": "ghcr.io/armanshirzad/vehicle-anomaly-api:latest",
+    "environment": "prod",
+    "desired_count": 2,
+    "min_capacity": 1,
+    "max_capacity": 4
+  }
+}
+

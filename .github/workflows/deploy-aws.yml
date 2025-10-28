@@ -11,7 +11,7 @@ permissions:
   packages: write
 
 env:
-  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/vehicle-anomaly-api
+  IMAGE_NAME: ghcr.io/armanshirzad/vehicle-anomaly-api
   AWS_REGION: us-east-1
 
 jobs:

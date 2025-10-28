@@ -164,7 +164,7 @@ echo ""
 echo -e "${YELLOW}Test 7: Prometheus Metrics${NC}"
 response=$(curl -s -w "\n%{http_code}" "${BASE_URL}/metrics")
 http_code=$(echo "$response" | tail -n1)
-metrics_count=$(echo "$response" | head -nmetrics_count=$(echo "$response" | wc -l))
+metrics_count=$(echo "$response" | wc -l)
 
 if [ "$http_code" = "200" ]; then
     echo -e "${GREEN}✓ Metrics endpoint accessible${NC}"

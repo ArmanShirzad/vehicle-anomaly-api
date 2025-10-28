@@ -232,6 +232,37 @@ cdk deploy
 9. Add integration tests
 10. Document deployment process
 
+## AWS Deployment
+
+This project demonstrates expertise in:
+- **AWS Fargate**: Container orchestration
+- **AWS CDK**: Infrastructure as Code
+- **S3**: Model artifact storage
+- **Application Load Balancer**: High availability
+- **Auto-scaling**: Horizontal scaling based on CPU
+- **CloudWatch**: Logging and monitoring
+- **X-Ray**: Distributed tracing
+
+Deploy to AWS using the included CDK stack:
+```bash
+cd deploy/cdk
+cdk synth
+cdk deploy
+```
+
+## Testing
+
+```bash
+# Run all tests
+pytest
+
+# Run with coverage
+pytest --cov=app tests/
+
+# Run specific test file
+pytest tests/test_scoring.py -v
+```
+
 ## License
 
 MIT

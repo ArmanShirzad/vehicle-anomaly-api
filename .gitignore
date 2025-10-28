@@ -55,3 +55,7 @@ htmlcov/
 *.xml
 *.html
 
+# Documentation (keep locally, not in git)
+IMPLEMENTATION_SUMMARY.md
+PROJECT_SHOWCASE.md
+

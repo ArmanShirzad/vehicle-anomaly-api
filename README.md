@@ -285,4 +285,4 @@ pytest tests/test_scoring.py -v
 
 ## License
 
-MIT
+MIt

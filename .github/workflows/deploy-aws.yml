@@ -58,6 +58,7 @@ jobs:
             ${{ env.IMAGE_NAME }}:latest
 
       - name: Configure AWS credentials
+        if: ${{ secrets.AWS_DEPLOY_ROLE_ARN != '' }}
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
@@ -65,6 +66,7 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
 
       - name: CDK synth
+        if: ${{ secrets.AWS_DEPLOY_ROLE_ARN != '' }}
         working-directory: deploy/cdk
         run: |
           cdk synth \
@@ -75,6 +77,7 @@ jobs:
             -c max_capacity=4
 
       - name: CDK diff
+        if: ${{ secrets.AWS_DEPLOY_ROLE_ARN != '' }}
         working-directory: deploy/cdk
         run: |
           cdk diff \
@@ -85,6 +88,7 @@ jobs:
             -c max_capacity=4
 
       - name: CDK deploy
+        if: ${{ secrets.AWS_DEPLOY_ROLE_ARN != '' }}
         working-directory: deploy/cdk
         run: |
           cdk deploy \
@@ -94,4 +98,11 @@ jobs:
             -c desired_count=2 \
             -c min_capacity=1 \
             -c max_capacity=4
+
+      - name: AWS deployment skipped
+        if: ${{ secrets.AWS_DEPLOY_ROLE_ARN == '' }}
+        run: |
+          echo "AWS deployment skipped - AWS_DEPLOY_ROLE_ARN secret not configured"
+          echo "Docker image built and pushed successfully to GHCR"
+          echo "Image available at: ${{ env.IMAGE_NAME }}:${{ github.sha }}"
 

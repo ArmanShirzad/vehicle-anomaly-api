@@ -64,7 +64,9 @@ Auto-scaling (1-4 instances based on CPU)
 Anyone can access it via HTTP/HTTPS
 ```
 
-## Quick Start (3 Commands)
+## Quick Start
+
+### With AWS CDK (Requires AWS Credentials)
 
 ```bash
 # 1. Install CDK dependencies
@@ -78,6 +80,20 @@ cdk deploy
 ```
 
 That's it. AWS provisions: VPC, load balancer, containers, autoscaling, monitoring, logs, and tracing.
+
+### CI/CD Pipeline
+
+The GitHub Actions workflow automatically:
+- Builds and pushes Docker image on every push to `main`
+- Deploys to AWS only if `AWS_DEPLOY_ROLE_ARN` secret is configured
+- Pipeline succeeds without AWS credentials (skips deployment gracefully)
+
+### Alternative: Deploy to Render/Railway (No AWS Required)
+
+1. Connect GitHub repo to Render/Railway
+2. Auto-detects Dockerfile
+3. Set `USE_LOCAL_STORAGE=true` environment variable
+4. Deploy - no AWS credentials needed
 
 ## What This Solves
 

@@ -185,6 +185,16 @@ pytest
 
 ## Deployment
 
+### CI/CD Pipeline (GitHub Actions)
+
+The repository includes a GitHub Actions workflow that:
+- **Always runs**: Builds and pushes Docker image to GitHub Container Registry (GHCR)
+- **Conditional**: Deploys to AWS Fargate only if `AWS_DEPLOY_ROLE_ARN` secret is configured
+
+The pipeline will succeed even without AWS credentials - it will build and push the Docker image, then skip AWS deployment with a clear message.
+
+### Manual Deployment
+
 The application can be deployed to AWS Fargate using the included CDK stack:
 
 ```bash
@@ -192,6 +202,16 @@ cd deploy/cdk
 cdk synth
 cdk deploy
 ```
+
+### Alternative Deployment Options
+
+For demonstration purposes without AWS credentials, you can deploy to:
+- **Render**: Connect GitHub repo, auto-detects Dockerfile
+- **Railway**: One-click deploy from GitHub
+- **Fly.io**: Global container deployment
+- **Local**: Use `docker-compose` (see Dockerfile in repo)
+
+Set `USE_LOCAL_STORAGE=true` environment variable for storage configuration.
 
 ## Development Status
 

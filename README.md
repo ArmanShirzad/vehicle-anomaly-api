@@ -185,17 +185,26 @@ pytest
 
 ## Deployment
 
-### CI/CD Pipeline (GitHub Actions)
+### CI/CD Pipeline
 
-The repository includes a GitHub Actions workflow that:
-- **Always runs**: Builds and pushes Docker image to GitHub Container Registry (GHCR)
-- **Conditional**: Deploys to AWS Fargate only if `AWS_DEPLOY_ROLE_ARN` secret is configured
+The repository includes a GitHub Actions workflow (`.github/workflows/deploy-aws.yml`) that automatically:
 
-The pipeline will succeed even without AWS credentials - it will build and push the Docker image, then skip AWS deployment with a clear message.
+1. **Builds and pushes Docker images** to GitHub Container Registry (GHCR) on every push to `main`
+2. **Deploys to AWS Fargate** if AWS credentials are configured (optional)
+
+**Workflow Behavior:**
+- **Always runs**: Docker image build and push to GHCR
+- **Conditional**: AWS deployment (only if `AWS_DEPLOY_ROLE_ARN` secret is configured)
+- **Pipeline passes** even without AWS credentials (AWS steps are skipped gracefully)
+
+**To enable AWS deployment:**
+1. Configure `AWS_DEPLOY_ROLE_ARN` secret in GitHub repository settings
+2. Set up IAM OIDC provider for GitHub Actions in AWS
+3. The workflow will automatically deploy on the next push
 
 ### Manual Deployment
 
-The application can be deployed to AWS Fargate using the included CDK stack:
+You can also deploy manually using the CDK stack:
 
 ```bash
 cd deploy/cdk
@@ -203,15 +212,7 @@ cdk synth
 cdk deploy
 ```
 
-### Alternative Deployment Options
-
-For demonstration purposes without AWS credentials, you can deploy to:
-- **Render**: Connect GitHub repo, auto-detects Dockerfile
-- **Railway**: One-click deploy from GitHub
-- **Fly.io**: Global container deployment
-- **Local**: Use `docker-compose` (see Dockerfile in repo)
-
-Set `USE_LOCAL_STORAGE=true` environment variable for storage configuration.
+**Note:** For local development and demos, you can deploy to alternative platforms (Render, Railway, Fly.io) without any code changes - the application uses local storage by default.
 
 ## Development Status
 

@@ -57,8 +57,19 @@ jobs:
             ${{ env.IMAGE_NAME }}:${{ github.sha }}
             ${{ env.IMAGE_NAME }}:latest
 
+      - name: Check AWS credentials availability
+        id: check-aws
+        run: |
+          if [ -z "${{ secrets.AWS_DEPLOY_ROLE_ARN }}" ]; then
+            echo "aws_available=false" >> $GITHUB_OUTPUT
+            echo "AWS credentials not configured. Skipping AWS deployment steps."
+          else
+            echo "aws_available=true" >> $GITHUB_OUTPUT
+            echo "AWS credentials found. Proceeding with deployment."
+          fi
+
       - name: Configure AWS credentials
-        if: ${{ secrets.AWS_DEPLOY_ROLE_ARN != '' }}
+        if: steps.check-aws.outputs.aws_available == 'true'
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
@@ -66,7 +77,7 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
 
       - name: CDK synth
-        if: ${{ secrets.AWS_DEPLOY_ROLE_ARN != '' }}
+        if: steps.check-aws.outputs.aws_available == 'true'
         working-directory: deploy/cdk
         run: |
           cdk synth \
@@ -77,7 +88,7 @@ jobs:
             -c max_capacity=4
 
       - name: CDK diff
-        if: ${{ secrets.AWS_DEPLOY_ROLE_ARN != '' }}
+        if: steps.check-aws.outputs.aws_available == 'true'
         working-directory: deploy/cdk
         run: |
           cdk diff \
@@ -88,7 +99,7 @@ jobs:
             -c max_capacity=4
 
       - name: CDK deploy
-        if: ${{ secrets.AWS_DEPLOY_ROLE_ARN != '' }}
+        if: steps.check-aws.outputs.aws_available == 'true'
         working-directory: deploy/cdk
         run: |
           cdk deploy \
@@ -99,10 +110,10 @@ jobs:
             -c min_capacity=1 \
             -c max_capacity=4
 
-      - name: AWS deployment skipped
-        if: ${{ secrets.AWS_DEPLOY_ROLE_ARN == '' }}
+      - name: Deployment summary
+        if: steps.check-aws.outputs.aws_available == 'false'
         run: |
-          echo "AWS deployment skipped - AWS_DEPLOY_ROLE_ARN secret not configured"
-          echo "Docker image built and pushed successfully to GHCR"
-          echo "Image available at: ${{ env.IMAGE_NAME }}:${{ github.sha }}"
+          echo "Docker image built and pushed to GHCR: ${{ env.IMAGE_NAME }}:${{ github.sha }}"
+          echo "AWS deployment skipped (credentials not configured)"
+          echo "To enable AWS deployment, configure AWS_DEPLOY_ROLE_ARN secret in repository settings."
 
